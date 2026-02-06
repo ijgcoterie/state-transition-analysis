@@ -294,11 +294,6 @@ class DataStore:
             conditions.append("date(SESSION_START) <= ?")
             params.append(end_date)
 
-        if user_ids:
-            placeholders = ','.join('?' * len(user_ids))
-            conditions.append(f"USER_ID IN ({placeholders})")
-            params.extend(user_ids)
-
         if min_session_number:
             conditions.append("SESSION_NUMBER >= ?")
             params.append(min_session_number)
@@ -307,16 +302,33 @@ class DataStore:
             conditions.append("SESSION_NUMBER <= ?")
             params.append(max_session_number)
 
-        where_clause = " AND ".join(conditions) if conditions else "1=1"
-
-        query = f"""
-            SELECT * FROM sessions
-            WHERE {where_clause}
-            ORDER BY USER_ID, SESSION_NUMBER
-        """
-
-        df = pd.read_sql(query, conn, params=params)
-        conn.close()
+        # SQLite has a variable limit (default 999), so batch user_ids
+        if user_ids:
+            BATCH_SIZE = 500
+            frames = []
+            for i in range(0, len(user_ids), BATCH_SIZE):
+                batch = user_ids[i:i + BATCH_SIZE]
+                placeholders = ','.join('?' * len(batch))
+                batch_conditions = conditions + [f"USER_ID IN ({placeholders})"]
+                where_clause = " AND ".join(batch_conditions) if batch_conditions else "1=1"
+                query = f"""
+                    SELECT * FROM sessions
+                    WHERE {where_clause}
+                    ORDER BY USER_ID, SESSION_NUMBER
+                """
+                batch_params = params + batch
+                frames.append(pd.read_sql(query, conn, params=batch_params))
+            conn.close()
+            df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        else:
+            where_clause = " AND ".join(conditions) if conditions else "1=1"
+            query = f"""
+                SELECT * FROM sessions
+                WHERE {where_clause}
+                ORDER BY USER_ID, SESSION_NUMBER
+            """
+            df = pd.read_sql(query, conn, params=params)
+            conn.close()
 
         # Parse dates
         df['SESSION_START'] = pd.to_datetime(df['SESSION_START'])

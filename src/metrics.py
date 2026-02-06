@@ -72,6 +72,66 @@ def calculate_transition_matrix(
     return matrix.round(1) if normalize else matrix
 
 
+def calculate_user_ever_transition_matrix(
+    df: pd.DataFrame,
+    normalize: bool = True,
+) -> pd.DataFrame:
+    """
+    Calculate user-level "ever transitioned" matrix.
+
+    For each pair (state_from, state_to), counts users who were observed in
+    state_from at some session N and in state_to at any later session M > N.
+
+    Args:
+        df: DataFrame with STATE, USER_ID, SESSION_NUMBER columns
+        normalize: If True, return percentages; if False, return user counts
+
+    Returns:
+        Transition matrix DataFrame (rows=from, cols=to)
+    """
+    # For each (user, state), find the earliest and latest session number
+    user_state = (
+        df.groupby(['USER_ID', 'STATE'])['SESSION_NUMBER']
+        .agg(first_session='min', last_session='max')
+        .reset_index()
+    )
+
+    # Self-join on USER_ID to get all (from_state, to_state) pairs per user
+    pairs = user_state.merge(user_state, on='USER_ID', suffixes=('_from', '_to'))
+
+    # A user counts for (from, to) if the first time they were in from_state
+    # is before the last time they were in to_state (i.e. to_state appeared
+    # in some session after from_state's first occurrence).
+    # Exclude same-state pairs — the diagonal is not meaningful here.
+    valid = pairs[
+        (pairs['first_session_from'] < pairs['last_session_to'])
+        & (pairs['STATE_from'] != pairs['STATE_to'])
+    ]
+
+    # Count distinct users per (from_state, to_state)
+    counts = (
+        valid.groupby(['STATE_from', 'STATE_to'])['USER_ID']
+        .nunique()
+        .reset_index(name='users')
+    )
+
+    state_order = list(STATE_NAMES.values())
+    matrix = pd.DataFrame(0, index=state_order, columns=state_order)
+    for _, row in counts.iterrows():
+        from_name = STATE_NAMES[row['STATE_from']]
+        to_name = STATE_NAMES[row['STATE_to']]
+        matrix.loc[from_name, to_name] = row['users']
+
+    if normalize:
+        users_per_state = df.groupby('STATE')['USER_ID'].nunique()
+        for state_num, state_name in STATE_NAMES.items():
+            count = users_per_state.get(state_num, 0)
+            if count > 0:
+                matrix.loc[state_name] = (matrix.loc[state_name] / count * 100).round(1)
+
+    return matrix
+
+
 def calculate_cohort_metrics(
     df: pd.DataFrame,
     config: Config = DEFAULT_CONFIG,
